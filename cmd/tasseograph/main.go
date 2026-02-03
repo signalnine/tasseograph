@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/signalnine/tasseograph/internal/agent"
+	"github.com/signalnine/tasseograph/internal/collector"
 	"github.com/signalnine/tasseograph/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -45,8 +46,20 @@ var collectorCmd = &cobra.Command{
 	Use:   "collector",
 	Short: "Run the central collector",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("collector not implemented")
-		return nil
+		cfg, err := config.LoadCollectorConfig(collectorConfigPath)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		srv, err := collector.NewServer(cfg)
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+
+		return srv.Run(ctx)
 	},
 }
 
