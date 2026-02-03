@@ -42,7 +42,7 @@ func TestIntegrationCollectorIngest(t *testing.T) {
 			"choices": []map[string]interface{}{
 				{
 					"message": map[string]string{
-						"content": `{"status": "warning", "issues": [{"severity": "warning", "category": "memory", "summary": "ECC error detected", "evidence": "EDAC MC0: 1 CE"}]}`,
+						"content": `{"status": "warning", "issues": [{"severity": "warning", "summary": "ECC error detected", "evidence": "EDAC MC0: 1 CE"}]}`,
 					},
 				},
 			},
@@ -184,9 +184,6 @@ func TestIntegrationCollectorIngest(t *testing.T) {
 	if len(result.Issues) != 1 {
 		t.Errorf("Stored issues count = %d, want 1", len(result.Issues))
 	} else {
-		if result.Issues[0].Category != "memory" {
-			t.Errorf("Issue category = %q, want %q", result.Issues[0].Category, "memory")
-		}
 		if result.Issues[0].Severity != "warning" {
 			t.Errorf("Issue severity = %q, want %q", result.Issues[0].Severity, "warning")
 		}

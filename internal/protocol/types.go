@@ -13,7 +13,6 @@ type DmesgDelta struct {
 // Issue represents a single detected anomaly
 type Issue struct {
 	Severity string `json:"severity"` // "warning" or "critical"
-	Category string `json:"category"` // "memory", "storage", "network", "thermal", "driver"
 	Summary  string `json:"summary"`
 	Evidence string `json:"evidence"`
 }

@@ -28,7 +28,7 @@ const systemPrompt = `You are a Linux kernel expert reviewing dmesg output from 
 Ignore routine noise: ACPI info, systemd lifecycle, USB enumeration, normal driver init.
 
 Respond with JSON only:
-{"status": "ok" | "warning" | "critical", "issues": [{"severity": "warning" | "critical", "category": "memory" | "storage" | "network" | "thermal" | "driver", "summary": "brief description", "evidence": "relevant log snippet"}]}
+{"status": "ok" | "warning" | "critical", "issues": [{"severity": "warning" | "critical", "summary": "brief description", "evidence": "relevant log snippet"}]}
 
 If nothing notable, return {"status": "ok", "issues": []}`
 
