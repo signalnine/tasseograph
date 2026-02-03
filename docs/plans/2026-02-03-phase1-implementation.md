@@ -233,12 +233,21 @@ max_retries: 3
 max_payload_bytes: 1048576
 tls_cert: /etc/tasseograph/tls/cert.pem
 tls_key: /etc/tasseograph/tls/key.pem
-llm_base_url: "https://inference.internal/v1"
-llm_model: "claude-3-5-haiku-20241022"
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+  - url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+    api_key_env: "OPENAI_API_KEY"
 `)
 	if err := os.WriteFile(configPath, content, 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	// Set env var for API key resolution
+	t.Setenv("INTERNAL_LLM_KEY", "internal-secret")
+	t.Setenv("OPENAI_API_KEY", "openai-secret")
 
 	cfg, err := LoadCollectorConfig(configPath)
 	if err != nil {
@@ -251,8 +260,17 @@ llm_model: "claude-3-5-haiku-20241022"
 	if cfg.MaxPayloadBytes != 1048576 {
 		t.Errorf("MaxPayloadBytes = %d, want %d", cfg.MaxPayloadBytes, 1048576)
 	}
-	if cfg.LLMBaseURL != "https://inference.internal/v1" {
-		t.Errorf("LLMBaseURL = %q, want %q", cfg.LLMBaseURL, "https://inference.internal/v1")
+	if len(cfg.LLMEndpoints) != 2 {
+		t.Fatalf("LLMEndpoints count = %d, want 2", len(cfg.LLMEndpoints))
+	}
+	if cfg.LLMEndpoints[0].URL != "https://inference.internal/v1" {
+		t.Errorf("Endpoint[0].URL = %q, want %q", cfg.LLMEndpoints[0].URL, "https://inference.internal/v1")
+	}
+	if cfg.LLMEndpoints[0].APIKey != "internal-secret" {
+		t.Errorf("Endpoint[0].APIKey = %q, want %q", cfg.LLMEndpoints[0].APIKey, "internal-secret")
+	}
+	if cfg.LLMEndpoints[1].APIKey != "openai-secret" {
+		t.Errorf("Endpoint[1].APIKey = %q, want %q", cfg.LLMEndpoints[1].APIKey, "openai-secret")
 	}
 }
 ```
@@ -289,18 +307,24 @@ type AgentConfig struct {
 	APIKey        string        `yaml:"-"` // from env only
 }
 
+// LLMEndpoint represents one LLM provider in the fallback chain
+type LLMEndpoint struct {
+	URL       string `yaml:"url"`
+	Model     string `yaml:"model"`
+	APIKeyEnv string `yaml:"api_key_env"` // env var name for API key
+	APIKey    string `yaml:"-"`           // resolved at load time
+}
+
 // CollectorConfig for the central collector
 type CollectorConfig struct {
-	ListenAddr      string `yaml:"listen_addr"`
-	DBPath          string `yaml:"db_path"`
-	MaxRetries      int    `yaml:"max_retries"`
-	MaxPayloadBytes int64  `yaml:"max_payload_bytes"`
-	TLSCert         string `yaml:"tls_cert"`
-	TLSKey          string `yaml:"tls_key"`
-	LLMBaseURL      string `yaml:"llm_base_url"`
-	LLMModel        string `yaml:"llm_model"`
-	APIKey          string `yaml:"-"` // agent auth, from env
-	LLMAPIKey       string `yaml:"-"` // LLM service, from env
+	ListenAddr      string        `yaml:"listen_addr"`
+	DBPath          string        `yaml:"db_path"`
+	MaxRetries      int           `yaml:"max_retries"`
+	MaxPayloadBytes int64         `yaml:"max_payload_bytes"`
+	TLSCert         string        `yaml:"tls_cert"`
+	TLSKey          string        `yaml:"tls_key"`
+	LLMEndpoints    []LLMEndpoint `yaml:"llm_endpoints"` // fallback chain
+	APIKey          string        `yaml:"-"`             // agent auth, from env
 }
 
 // LoadAgentConfig loads agent config from YAML file with env overrides
@@ -347,8 +371,12 @@ func LoadCollectorConfig(path string) (*CollectorConfig, error) {
 	if key := os.Getenv("TASSEOGRAPH_API_KEY"); key != "" {
 		cfg.APIKey = key
 	}
-	if key := os.Getenv("TASSEOGRAPH_LLM_API_KEY"); key != "" {
-		cfg.LLMAPIKey = key
+
+	// Resolve API keys for each LLM endpoint from env vars
+	for i := range cfg.LLMEndpoints {
+		if cfg.LLMEndpoints[i].APIKeyEnv != "" {
+			cfg.LLMEndpoints[i].APIKey = os.Getenv(cfg.LLMEndpoints[i].APIKeyEnv)
+		}
 	}
 
 	return &cfg, nil
@@ -1017,6 +1045,7 @@ git commit -m "feat: add SQLite database layer for results storage"
 package collector
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -1046,30 +1075,35 @@ func TestLLMClientParseResponse(t *testing.T) {
 }
 
 func TestLLMClientAnalyze(t *testing.T) {
-	// Mock LLM server
+	// Mock LLM server (OpenAI-compatible format)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("Method = %q, want POST", r.Method)
+		}
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("Path = %q, want /chat/completions", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("Missing or wrong Authorization header")
 		}
 
-		// Return mock response in Anthropic format
+		// Return mock response in OpenAI format
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"content": []map[string]interface{}{
+			"choices": []map[string]interface{}{
 				{
-					"type": "text",
-					"text": `{"status": "ok", "issues": []}`,
+					"message": map[string]string{
+						"content": `{"status": "ok", "issues": []}`,
+					},
 				},
 			},
 		})
 	}))
 	defer server.Close()
 
-	client := NewLLMClient(server.URL, "test-model", "test-key")
-	result, latency, err := client.Analyze([]string{"[Mon Feb 3 12:00:00 2026] Normal message"})
+	endpoints := []Endpoint{{URL: server.URL, Model: "test-model", APIKey: "test-key"}}
+	client := NewLLMClient(endpoints)
+	result, latency, err := client.Analyze(context.Background(), []string{"[Mon Feb 3 12:00:00 2026] Normal message"})
 	if err != nil {
 		t.Fatalf("Analyze error: %v", err)
 	}
@@ -1078,6 +1112,52 @@ func TestLLMClientAnalyze(t *testing.T) {
 	}
 	if latency <= 0 {
 		t.Errorf("Latency = %d, want > 0", latency)
+	}
+}
+
+func TestLLMClientFallback(t *testing.T) {
+	// First server fails, second succeeds
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer failServer.Close()
+
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "ok", "issues": []}`}},
+			},
+		})
+	}))
+	defer successServer.Close()
+
+	endpoints := []Endpoint{
+		{URL: failServer.URL, Model: "primary", APIKey: "key1"},
+		{URL: successServer.URL, Model: "fallback", APIKey: "key2"},
+	}
+	client := NewLLMClient(endpoints)
+	result, _, err := client.Analyze(context.Background(), []string{"test"})
+	if err != nil {
+		t.Fatalf("Expected fallback to succeed, got: %v", err)
+	}
+	if result.Status != "ok" {
+		t.Errorf("Status = %q, want ok", result.Status)
+	}
+}
+
+func TestLLMClientAllUnavailable(t *testing.T) {
+	// All endpoints fail
+	endpoints := []Endpoint{
+		{URL: "http://127.0.0.1:59998", Model: "ep1", APIKey: "key"},
+		{URL: "http://127.0.0.1:59999", Model: "ep2", APIKey: "key"},
+	}
+	client := NewLLMClient(endpoints)
+	_, _, err := client.Analyze(context.Background(), []string{"test"})
+	if err == nil {
+		t.Fatal("Expected error when all endpoints unavailable")
+	}
+	if !IsUnavailable(err) {
+		t.Errorf("Expected ErrLLMUnavailable, got: %v", err)
 	}
 }
 ```
@@ -1099,9 +1179,13 @@ package collector
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -1124,36 +1208,83 @@ Respond with JSON only:
 
 If nothing notable, return {"status": "ok", "issues": []}`
 
-// LLMClient calls the LLM inference API
-type LLMClient struct {
-	baseURL string
-	model   string
-	apiKey  string
-	client  *http.Client
+// ErrLLMUnavailable indicates all LLM endpoints are down
+var ErrLLMUnavailable = errors.New("all LLM endpoints unavailable")
+
+// Endpoint represents a single LLM provider
+type Endpoint struct {
+	URL    string
+	Model  string
+	APIKey string
 }
 
-// NewLLMClient creates a new LLM client
-func NewLLMClient(baseURL, model, apiKey string) *LLMClient {
+// LLMClient calls LLM inference APIs with fallback support (OpenAI-compatible format)
+type LLMClient struct {
+	endpoints []Endpoint
+	client    *http.Client
+}
+
+// NewLLMClient creates a new LLM client with fallback chain
+func NewLLMClient(endpoints []Endpoint) *LLMClient {
 	return &LLMClient{
-		baseURL: strings.TrimSuffix(baseURL, "/"),
-		model:   model,
-		apiKey:  apiKey,
-		client:  &http.Client{Timeout: 60 * time.Second},
+		endpoints: endpoints,
+		client: &http.Client{
+			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout: 5 * time.Second,
+				}).DialContext,
+			},
+		},
 	}
 }
 
-// Analyze sends dmesg lines to the LLM and returns the analysis
-func (c *LLMClient) Analyze(lines []string) (*protocol.AnalysisResult, int64, error) {
+// Analyze sends dmesg lines to the LLM and returns the analysis.
+// Tries each endpoint in order; returns ErrLLMUnavailable only if ALL fail.
+func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.AnalysisResult, int64, error) {
+	if len(c.endpoints) == 0 {
+		return nil, 0, errors.New("no LLM endpoints configured")
+	}
+
+	var lastErr error
+	var totalLatency int64
+
+	for i, ep := range c.endpoints {
+		result, latency, err := c.tryEndpoint(ctx, ep, lines)
+		totalLatency += latency
+
+		if err == nil {
+			if i > 0 {
+				log.Printf("LLM fallback: endpoint %d (%s) succeeded after %d failures", i+1, ep.Model, i)
+			}
+			return result, totalLatency, nil
+		}
+
+		lastErr = err
+		if isUnavailableErr(err) {
+			log.Printf("LLM endpoint %d (%s) unavailable: %v, trying next...", i+1, ep.Model, err)
+			continue
+		}
+
+		// Non-availability error (e.g., parse error) - don't try fallback
+		return nil, totalLatency, err
+	}
+
+	// All endpoints failed
+	return nil, totalLatency, fmt.Errorf("%w: %v", ErrLLMUnavailable, lastErr)
+}
+
+func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string) (*protocol.AnalysisResult, int64, error) {
 	start := time.Now()
 
-	// Build request body (Anthropic Messages API format)
+	// Build request body (OpenAI Chat Completions format)
 	reqBody := map[string]interface{}{
-		"model":      c.model,
-		"max_tokens": 1024,
-		"system":     systemPrompt,
+		"model": ep.Model,
 		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": strings.Join(lines, "\n")},
 		},
+		"max_tokens": 1024,
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -1161,50 +1292,81 @@ func (c *LLMClient) Analyze(lines []string) (*protocol.AnalysisResult, int64, er
 		return nil, 0, err
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+"/messages", bytes.NewReader(bodyBytes))
+	url := strings.TrimSuffix(ep.URL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, 0, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Authorization", "Bearer "+ep.APIKey)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		latency := time.Since(start).Milliseconds()
+		// Connection errors are "unavailable"
+		var netErr net.Error
+		if errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, latency, fmt.Errorf("connection failed: %w", err)
+		}
+		return nil, latency, err
 	}
 	defer resp.Body.Close()
 
 	latency := time.Since(start).Milliseconds()
+
+	// Service unavailable / bad gateway / gateway timeout - try next endpoint
+	if resp.StatusCode == http.StatusBadGateway ||
+		resp.StatusCode == http.StatusServiceUnavailable ||
+		resp.StatusCode == http.StatusGatewayTimeout {
+		return nil, latency, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, latency, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse response
+	// Parse OpenAI response format
 	var apiResp struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, latency, err
 	}
 
-	if len(apiResp.Content) == 0 {
+	if len(apiResp.Choices) == 0 {
 		return nil, latency, fmt.Errorf("empty response from API")
 	}
 
-	// Parse the JSON from the text content
+	// Parse the JSON from the message content
 	var result protocol.AnalysisResult
-	if err := json.Unmarshal([]byte(apiResp.Content[0].Text), &result); err != nil {
+	if err := json.Unmarshal([]byte(apiResp.Choices[0].Message.Content), &result); err != nil {
 		return nil, latency, fmt.Errorf("failed to parse LLM response: %w", err)
 	}
 
 	return &result, latency, nil
+}
+
+// isUnavailableErr checks if an error indicates a transient availability issue
+func isUnavailableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection") ||
+		strings.Contains(s, "HTTP 502") ||
+		strings.Contains(s, "HTTP 503") ||
+		strings.Contains(s, "HTTP 504")
+}
+
+// IsUnavailable checks if the error indicates all LLM endpoints are down
+func IsUnavailable(err error) bool {
+	return errors.Is(err, ErrLLMUnavailable)
 }
 ```
 
@@ -1301,17 +1463,18 @@ func TestIngestHandlerSuccess(t *testing.T) {
 	db, _ := NewDB(filepath.Join(dir, "test.db"))
 	defer db.Close()
 
-	// Mock LLM that returns ok
+	// Mock LLM that returns ok (OpenAI format)
 	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"content": []map[string]interface{}{
-				{"type": "text", "text": `{"status": "ok", "issues": []}`},
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "ok", "issues": []}`}},
 			},
 		})
 	}))
 	defer mockLLM.Close()
 
-	llmClient := NewLLMClient(mockLLM.URL, "test", "key")
+	endpoints := []Endpoint{{URL: mockLLM.URL, Model: "test", APIKey: "key"}}
+	llmClient := NewLLMClient(endpoints)
 	handler := NewIngestHandler(db, llmClient, "secret", 1<<20)
 
 	delta := protocol.DmesgDelta{
@@ -1427,7 +1590,7 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var llmErr error
 
 	if h.llm != nil {
-		result, latency, llmErr = h.llm.Analyze(delta.Lines)
+		result, latency, llmErr = h.llm.Analyze(r.Context(), delta.Lines)
 	}
 
 	// Store result
@@ -1439,8 +1602,14 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if llmErr != nil {
-		log.Printf("LLM error for %s: %v", delta.Hostname, llmErr)
-		stored.Status = "error"
+		if IsUnavailable(llmErr) {
+			// LLM service is down - log but don't lose the data
+			log.Printf("LLM unavailable for %s: %v (data preserved)", delta.Hostname, llmErr)
+			stored.Status = "llm_unavailable"
+		} else {
+			log.Printf("LLM error for %s: %v", delta.Hostname, llmErr)
+			stored.Status = "error"
+		}
 	} else if result != nil {
 		stored.Status = result.Status
 		stored.Issues = result.Issues
@@ -1760,7 +1929,16 @@ func NewServer(cfg *config.CollectorConfig) (*Server, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	llm := NewLLMClient(cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMAPIKey)
+	// Convert config endpoints to LLM client endpoints
+	var endpoints []Endpoint
+	for _, ep := range cfg.LLMEndpoints {
+		endpoints = append(endpoints, Endpoint{
+			URL:    ep.URL,
+			Model:  ep.Model,
+			APIKey: ep.APIKey,
+		})
+	}
+	llm := NewLLMClient(endpoints)
 
 	handler := NewIngestHandler(db, llm, cfg.APIKey, cfg.MaxPayloadBytes)
 
@@ -1921,9 +2099,23 @@ listen_addr: ":9311"
 # SQLite database path
 db_path: /var/lib/tasseograph/results.db
 
-# LLM inference endpoint
-llm_base_url: "https://inference.internal/v1"
-llm_model: "claude-3-5-haiku-20241022"
+# LLM endpoints with fallback chain (tried in order)
+# Uses OpenAI-compatible API format
+llm_endpoints:
+  # Primary: internal inference gateway
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+
+  # Fallback 1: different model on same gateway
+  - url: "https://inference.internal/v1"
+    model: "openai/gpt-5-nano"
+    api_key_env: "INTERNAL_LLM_KEY"
+
+  # Fallback 2: direct to OpenAI (if internal is down)
+  - url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+    api_key_env: "OPENAI_API_KEY"
 
 # Retry settings
 max_retries: 3
@@ -1937,7 +2129,8 @@ tls_key: /etc/tasseograph/tls/key.pem
 
 # API keys are set via environment variables:
 # TASSEOGRAPH_API_KEY - shared secret for agent auth
-# TASSEOGRAPH_LLM_API_KEY - LLM service API key
+# INTERNAL_LLM_KEY - your internal inference gateway key
+# OPENAI_API_KEY - fallback OpenAI key (optional)
 ```
 
 **Step 3: Create agent systemd unit**
@@ -2108,11 +2301,11 @@ func TestIntegrationCollectorIngest(t *testing.T) {
 	// Generate self-signed cert
 	certPath, keyPath := generateTestCert(t, dir)
 
-	// Mock LLM server
+	// Mock LLM server (OpenAI format)
 	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"content": []map[string]interface{}{
-				{"type": "text", "text": `{"status": "warning", "issues": [{"severity": "warning", "category": "memory", "summary": "Test issue", "evidence": "test"}]}`},
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "warning", "issues": [{"severity": "warning", "category": "memory", "summary": "Test issue", "evidence": "test"}]}`}},
 			},
 		})
 	}))
@@ -2120,13 +2313,13 @@ func TestIntegrationCollectorIngest(t *testing.T) {
 
 	// Write collector config
 	cfg := &config.CollectorConfig{
-		ListenAddr:      ":0", // random port
-		DBPath:          filepath.Join(dir, "test.db"),
-		TLSCert:         certPath,
-		TLSKey:          keyPath,
-		LLMBaseURL:      llmServer.URL,
-		LLMModel:        "test",
-		LLMAPIKey:       "test-key",
+		ListenAddr: ":0", // random port
+		DBPath:     filepath.Join(dir, "test.db"),
+		TLSCert:    certPath,
+		TLSKey:     keyPath,
+		LLMEndpoints: []config.LLMEndpoint{
+			{URL: llmServer.URL, Model: "test", APIKey: "test-key"},
+		},
 		APIKey:          "agent-secret",
 		MaxPayloadBytes: 1 << 20,
 	}
@@ -2138,7 +2331,8 @@ func TestIntegrationCollectorIngest(t *testing.T) {
 	}
 	defer db.Close()
 
-	llm := collector.NewLLMClient(cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMAPIKey)
+	endpoints := []collector.Endpoint{{URL: llmServer.URL, Model: "test", APIKey: "test-key"}}
+	llm := collector.NewLLMClient(endpoints)
 	handler := collector.NewIngestHandler(db, llm, cfg.APIKey, cfg.MaxPayloadBytes)
 
 	// Test request
