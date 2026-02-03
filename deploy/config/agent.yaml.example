@@ -1,0 +1,7 @@
+# Tasseograph Agent Configuration
+collector_url: "https://collector.internal:9311/ingest"
+poll_interval: 5m
+state_file: /var/lib/tasseograph/last_timestamp
+# hostname: "custom-hostname"  # defaults to os.Hostname()
+tls_skip_verify: true  # for self-signed certs during pilot
+# API key is set via environment variable TASSEOGRAPH_API_KEY

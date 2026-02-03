@@ -1,0 +1,18 @@
+# Tasseograph Collector Configuration
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+  - url: "https://inference.internal/v1"
+    model: "openai/gpt-5-nano"
+    api_key_env: "INTERNAL_LLM_KEY"
+  - url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+    api_key_env: "OPENAI_API_KEY"
+max_retries: 3
+max_payload_bytes: 1048576
+tls_cert: /etc/tasseograph/tls/cert.pem
+tls_key: /etc/tasseograph/tls/key.pem
+# API keys via env vars: TASSEOGRAPH_API_KEY, INTERNAL_LLM_KEY, OPENAI_API_KEY

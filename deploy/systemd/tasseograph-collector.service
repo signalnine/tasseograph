@@ -1,0 +1,17 @@
+[Unit]
+Description=Tasseograph dmesg Collector
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tasseograph collector --config /etc/tasseograph/collector.yaml
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tasseograph
+EnvironmentFile=-/etc/tasseograph/collector.env
+
+[Install]
+WantedBy=multi-user.target
