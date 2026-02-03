@@ -22,6 +22,9 @@ tls_skip_verify: true
 		t.Fatal(err)
 	}
 
+	// Set required env var
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-key")
+
 	cfg, err := LoadAgentConfig(configPath)
 	if err != nil {
 		t.Fatalf("LoadAgentConfig failed: %v", err)
@@ -88,6 +91,7 @@ llm_endpoints:
 	// Set env var for API key resolution
 	t.Setenv("INTERNAL_LLM_KEY", "internal-secret")
 	t.Setenv("OPENAI_API_KEY", "openai-secret")
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key") // Required for validation
 
 	cfg, err := LoadCollectorConfig(configPath)
 	if err != nil {

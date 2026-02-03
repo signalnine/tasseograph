@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"time"
 
@@ -63,6 +64,14 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		cfg.Hostname, _ = os.Hostname()
 	}
 
+	// Validate required fields
+	if cfg.APIKey == "" {
+		return nil, errors.New("TASSEOGRAPH_API_KEY environment variable required")
+	}
+	if cfg.CollectorURL == "" {
+		return nil, errors.New("collector_url is required in config")
+	}
+
 	return &cfg, nil
 }
 
@@ -88,6 +97,14 @@ func LoadCollectorConfig(path string) (*CollectorConfig, error) {
 		if cfg.LLMEndpoints[i].APIKeyEnv != "" {
 			cfg.LLMEndpoints[i].APIKey = os.Getenv(cfg.LLMEndpoints[i].APIKeyEnv)
 		}
+	}
+
+	// Validate required fields
+	if cfg.APIKey == "" {
+		return nil, errors.New("TASSEOGRAPH_API_KEY environment variable required")
+	}
+	if len(cfg.LLMEndpoints) == 0 {
+		return nil, errors.New("at least one llm_endpoints entry required")
 	}
 
 	return &cfg, nil

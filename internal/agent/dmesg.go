@@ -55,7 +55,7 @@ func GetDmesg() ([]string, error) {
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, errors.New("dmesg command failed (check permissions or CAP_SYSLOG): " + err.Error())
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
