@@ -67,8 +67,9 @@ func TestLLMClientAnalyze(t *testing.T) {
 	if result.Status != "ok" {
 		t.Errorf("Status = %q, want %q", result.Status, "ok")
 	}
-	if latency <= 0 {
-		t.Errorf("Latency = %d, want > 0", latency)
+	// Latency can be 0 for very fast mock responses (sub-millisecond)
+	if latency < 0 {
+		t.Errorf("Latency = %d, want >= 0", latency)
 	}
 }
 
