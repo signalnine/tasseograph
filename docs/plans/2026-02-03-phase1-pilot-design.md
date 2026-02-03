@@ -1,6 +1,7 @@
 # Tasseograph Phase 1 Pilot Design
 
 *Design finalized: 2026-02-03*
+*Implementation complete: 2026-02-03*
 
 ## Overview
 
@@ -41,9 +42,10 @@ Tasseograph Phase 1 is a pilot system to validate LLM-based dmesg anomaly detect
 **`tasseograph agent`** runs on each of the 20 pilot hosts as a systemd service.
 
 **Responsibilities:**
-- Parse dmesg output with timestamps (`dmesg -T`)
+- Parse dmesg output with timestamps (`dmesg -T` with `LC_ALL=C` for consistent format)
 - Track last-seen timestamp in a state file (`/var/lib/tasseograph/last_timestamp`)
 - Extract only new lines since last run
+- Cap lines at 500 max to control LLM costs (keeps most recent)
 - POST delta to collector with hostname identifier
 - Update state file on successful send
 
@@ -94,14 +96,24 @@ max_payload_bytes: 1048576  # 1MB
 tls_cert: /etc/tasseograph/tls/cert.pem
 tls_key: /etc/tasseograph/tls/key.pem
 
-# LLM inference endpoint (internal service or public API)
-llm_base_url: "https://inference.internal/v1"
-llm_model: "claude-3-5-haiku-20241022"
+# LLM inference endpoints - fallback chain (tries in order)
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+  - url: "https://inference.internal/v1"
+    model: "openai/gpt-5-nano"
+    api_key_env: "INTERNAL_LLM_KEY"
+  - url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+    api_key_env: "OPENAI_API_KEY"
 ```
 
-Environment overrides:
-- `TASSEOGRAPH_API_KEY` - shared secret for agent auth
-- `TASSEOGRAPH_LLM_API_KEY` - inference service API key
+Environment variables:
+- `TASSEOGRAPH_API_KEY` - shared secret for agent auth (required)
+- LLM API keys as specified in each endpoint's `api_key_env` field
+
+The collector uses OpenAI-compatible Chat Completions API format (`/chat/completions`), which works with most inference gateways (LiteLLM, vLLM, etc.).
 
 **SQLite schema:**
 ```sql
@@ -136,9 +148,9 @@ tasseograph/
 │   │   ├── dmesg.go          # dmesg parsing, timestamp extraction
 │   │   └── state.go          # State file read/write
 │   ├── collector/
-│   │   ├── collector.go      # Main collector server
+│   │   ├── server.go         # Main collector server
 │   │   ├── handler.go        # HTTP handler for /ingest
-│   │   ├── llm.go            # LLM inference client (internal or public API)
+│   │   ├── llm.go            # LLM inference client with fallback chain
 │   │   └── db.go             # SQLite operations
 │   ├── config/
 │   │   └── config.go         # YAML loading, env var overrides
@@ -228,12 +240,14 @@ sqlite3 -json /var/lib/tasseograph/results.db \
 
 | Scenario | Behavior |
 |----------|----------|
-| LLM inference down | Retry 3x with backoff (1s, 2s, 4s), then store error record and return 502 to agent |
-| LLM rate limited | Respect `Retry-After` header, return 503 to agent |
+| LLM endpoint fails (502/503/504) | Try next endpoint in fallback chain |
+| All LLM endpoints fail | Store "llm_unavailable" status, preserve raw dmesg, return 200 |
 | Invalid API response | Store raw response in DB for debugging, return 500 |
 | Malformed agent payload | Return 400, log details |
 | Auth failure | Return 401, don't log payload contents |
 | Payload too large | Return 413 Request Entity Too Large |
+
+The fallback chain ensures graceful degradation - data is never lost even if all LLM endpoints are unavailable.
 
 ## Out of Scope for Phase 1
 
