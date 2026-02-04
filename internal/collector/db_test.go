@@ -26,7 +26,6 @@ func TestDBInsertAndQuery(t *testing.T) {
 		Status:    "warning",
 		Issues: []protocol.Issue{
 			{
-				Severity: "warning",
 				Summary:  "ECC error",
 				Evidence: "EDAC MC0: 1 CE",
 			},

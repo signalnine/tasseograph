@@ -75,7 +75,6 @@ The LLM analyzes dmesg and returns:
   "status": "warning",
   "issues": [
     {
-      "severity": "warning",
       "summary": "ECC error detected on DIMM0",
       "evidence": "EDAC MC0: 1 CE memory error"
     }
@@ -83,9 +82,7 @@ The LLM analyzes dmesg and returns:
 }
 ```
 
-**Status**: `ok`, `warning`, `critical`
-
-**Severity**: `warning`, `critical`
+**Status**: `ok` (no issues), `warning` (needs attention), `critical` (urgent)
 
 ## Querying Results
 

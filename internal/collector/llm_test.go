@@ -13,7 +13,7 @@ import (
 
 func TestLLMClientParseResponse(t *testing.T) {
 	// Test parsing the expected JSON format
-	response := `{"status": "warning", "issues": [{"severity": "warning", "summary": "ECC error", "evidence": "EDAC MC0"}]}`
+	response := `{"status": "warning", "issues": [{"summary": "ECC error", "evidence": "EDAC MC0"}]}`
 
 	var result protocol.AnalysisResult
 	if err := json.Unmarshal([]byte(response), &result); err != nil {
