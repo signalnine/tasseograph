@@ -112,6 +112,12 @@ func LoadCollectorConfig(path string) (*CollectorConfig, error) {
 	if len(cfg.LLMEndpoints) == 0 {
 		return nil, errors.New("at least one llm_endpoints entry required")
 	}
+	if cfg.MaxPayloadBytes < 0 {
+		return nil, errors.New("max_payload_bytes must be >= 0 (0 means use default)")
+	}
+	if cfg.MaxPayloadBytes == 0 {
+		cfg.MaxPayloadBytes = 1 << 20 // 1 MB default -- matches deploy/config example
+	}
 
 	return &cfg, nil
 }

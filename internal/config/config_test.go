@@ -133,6 +133,91 @@ poll_interval: 5m
 	}
 }
 
+func TestLoadCollectorConfig_DefaultMaxPayloadBytesWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	// max_payload_bytes omitted -- YAML zero value is 0, which makes the
+	// handler reject every request with a body. Should default to 1 MB.
+	content := []byte(`
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+tls_cert: /etc/tasseograph/tls/cert.pem
+tls_key: /etc/tasseograph/tls/key.pem
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key")
+
+	cfg, err := LoadCollectorConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadCollectorConfig failed: %v", err)
+	}
+	if cfg.MaxPayloadBytes != 1048576 {
+		t.Errorf("MaxPayloadBytes = %d, want 1048576 (1MB default)", cfg.MaxPayloadBytes)
+	}
+}
+
+func TestLoadCollectorConfig_DefaultMaxPayloadBytesWhenZero(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	content := []byte(`
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+max_payload_bytes: 0
+tls_cert: /etc/tasseograph/tls/cert.pem
+tls_key: /etc/tasseograph/tls/key.pem
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key")
+
+	cfg, err := LoadCollectorConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadCollectorConfig failed: %v", err)
+	}
+	if cfg.MaxPayloadBytes != 1048576 {
+		t.Errorf("MaxPayloadBytes = %d, want 1048576 (1MB default)", cfg.MaxPayloadBytes)
+	}
+}
+
+func TestLoadCollectorConfig_NegativeMaxPayloadBytesErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	content := []byte(`
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+max_payload_bytes: -1
+tls_cert: /etc/tasseograph/tls/cert.pem
+tls_key: /etc/tasseograph/tls/key.pem
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key")
+
+	_, err := LoadCollectorConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative max_payload_bytes, got nil")
+	}
+	if !strings.Contains(err.Error(), "max_payload_bytes") {
+		t.Errorf("error %q does not mention max_payload_bytes", err.Error())
+	}
+}
+
 func TestLoadCollectorConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "collector.yaml")
