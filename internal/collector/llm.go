@@ -139,8 +139,10 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 
 	latency := time.Since(start).Milliseconds()
 
-	// Service unavailable / bad gateway / gateway timeout - try next endpoint
-	if resp.StatusCode == http.StatusBadGateway ||
+	// Transient errors - try next endpoint
+	if resp.StatusCode == http.StatusRequestTimeout ||
+		resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode == http.StatusBadGateway ||
 		resp.StatusCode == http.StatusServiceUnavailable ||
 		resp.StatusCode == http.StatusGatewayTimeout {
 		return nil, latency, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -183,6 +185,8 @@ func isUnavailableErr(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "connection") ||
+		strings.Contains(s, "HTTP 408") ||
+		strings.Contains(s, "HTTP 429") ||
 		strings.Contains(s, "HTTP 502") ||
 		strings.Contains(s, "HTTP 503") ||
 		strings.Contains(s, "HTTP 504")

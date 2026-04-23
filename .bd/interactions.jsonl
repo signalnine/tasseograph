@@ -4,3 +4,5 @@
 {"id":"int-15316f73","kind":"field_change","created_at":"2026-04-23T09:53:44.085774322Z","actor":"Gabe Ortiz","issue_id":"tasseograph-73u","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
 {"id":"int-de9384be","kind":"field_change","created_at":"2026-04-23T10:12:07.810403825Z","actor":"Gabe Ortiz","issue_id":"tasseograph-jgm","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-407f8739","kind":"field_change","created_at":"2026-04-23T10:12:29.538111668Z","actor":"Gabe Ortiz","issue_id":"tasseograph-jgm","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Fixed: log now prints actual pre-truncation count and number of dropped lines"}}
+{"id":"int-64d908c2","kind":"field_change","created_at":"2026-04-23T18:45:02.260500194Z","actor":"Gabe Ortiz","issue_id":"tasseograph-2d0","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-a600a7e0","kind":"field_change","created_at":"2026-04-23T18:45:48.388933224Z","actor":"Gabe Ortiz","issue_id":"tasseograph-2d0","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}

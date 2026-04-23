@@ -100,6 +100,66 @@ func TestLLMClientFallback(t *testing.T) {
 	}
 }
 
+func TestLLMClientFallbackOnRateLimit(t *testing.T) {
+	// Primary returns 429 (rate limited); fallback should succeed.
+	rateLimitServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer rateLimitServer.Close()
+
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "ok", "issues": []}`}},
+			},
+		})
+	}))
+	defer successServer.Close()
+
+	endpoints := []Endpoint{
+		{URL: rateLimitServer.URL, Model: "primary", APIKey: "key1"},
+		{URL: successServer.URL, Model: "fallback", APIKey: "key2"},
+	}
+	client := NewLLMClient(endpoints)
+	result, _, err := client.Analyze(context.Background(), []string{"test"})
+	if err != nil {
+		t.Fatalf("Expected fallback on 429, got: %v", err)
+	}
+	if result.Status != "ok" {
+		t.Errorf("Status = %q, want ok", result.Status)
+	}
+}
+
+func TestLLMClientFallbackOnRequestTimeout(t *testing.T) {
+	// Primary returns 408 (request timeout); fallback should succeed.
+	timeoutServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusRequestTimeout)
+	}))
+	defer timeoutServer.Close()
+
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "ok", "issues": []}`}},
+			},
+		})
+	}))
+	defer successServer.Close()
+
+	endpoints := []Endpoint{
+		{URL: timeoutServer.URL, Model: "primary", APIKey: "key1"},
+		{URL: successServer.URL, Model: "fallback", APIKey: "key2"},
+	}
+	client := NewLLMClient(endpoints)
+	result, _, err := client.Analyze(context.Background(), []string{"test"})
+	if err != nil {
+		t.Fatalf("Expected fallback on 408, got: %v", err)
+	}
+	if result.Status != "ok" {
+		t.Errorf("Status = %q, want ok", result.Status)
+	}
+}
+
 func TestLLMClientAllUnavailable(t *testing.T) {
 	// All endpoints fail
 	endpoints := []Endpoint{
