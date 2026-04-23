@@ -86,9 +86,10 @@ func (a *Agent) collect() error {
 	}
 
 	// Cap lines to prevent LLM cost explosion
+	origCount := len(newLines)
 	newLines, truncated := CapLines(newLines)
 	if truncated {
-		log.Printf("WARNING: Truncated to %d lines (was %d+)", MaxLines, MaxLines)
+		log.Printf("WARNING: Truncated to %d lines (was %d, dropped %d oldest)", MaxLines, origCount, origCount-MaxLines)
 	}
 
 	log.Printf("Sending %d new dmesg lines", len(newLines))
