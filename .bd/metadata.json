@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tasseograph",
+  "project_id": "47b5aab8-7220-4016-ad21-bf8026f53034"
+}

@@ -36,3 +36,5 @@ go.work.sum
 
 # Build output
 dist/
+.dolt/
+*.db
