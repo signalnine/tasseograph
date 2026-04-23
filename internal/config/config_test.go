@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,72 @@ state_file: /var/lib/tasseograph/last_timestamp
 
 	if cfg.APIKey != "test-secret" {
 		t.Errorf("APIKey = %q, want %q", cfg.APIKey, "test-secret")
+	}
+}
+
+func TestLoadAgentConfig_MissingPollIntervalErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.yaml")
+	// poll_interval omitted entirely - YAML zero value is 0, which panics
+	// in time.NewTicker(0) in agent.Run.
+	content := []byte(`
+collector_url: "https://collector.internal:9311/ingest"
+state_file: /var/lib/tasseograph/last_timestamp
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-key")
+
+	_, err := LoadAgentConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for missing poll_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "poll_interval") {
+		t.Errorf("error %q does not mention poll_interval", err.Error())
+	}
+}
+
+func TestLoadAgentConfig_ZeroPollIntervalErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.yaml")
+	content := []byte(`
+collector_url: "https://collector.internal:9311/ingest"
+poll_interval: 0s
+state_file: /var/lib/tasseograph/last_timestamp
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-key")
+
+	_, err := LoadAgentConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for zero poll_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "poll_interval") {
+		t.Errorf("error %q does not mention poll_interval", err.Error())
+	}
+}
+
+func TestLoadAgentConfig_MissingStateFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.yaml")
+	content := []byte(`
+collector_url: "https://collector.internal:9311/ingest"
+poll_interval: 5m
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-key")
+
+	_, err := LoadAgentConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for missing state_file, got nil")
+	}
+	if !strings.Contains(err.Error(), "state_file") {
+		t.Errorf("error %q does not mention state_file", err.Error())
 	}
 }
 

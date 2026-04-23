@@ -71,6 +71,12 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if cfg.CollectorURL == "" {
 		return nil, errors.New("collector_url is required in config")
 	}
+	if cfg.PollInterval <= 0 {
+		return nil, errors.New("poll_interval must be a positive duration (e.g. 5m)")
+	}
+	if cfg.StateFile == "" {
+		return nil, errors.New("state_file is required in config")
+	}
 
 	return &cfg, nil
 }
