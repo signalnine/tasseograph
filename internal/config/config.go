@@ -118,6 +118,15 @@ func LoadCollectorConfig(path string) (*CollectorConfig, error) {
 	if cfg.MaxPayloadBytes == 0 {
 		cfg.MaxPayloadBytes = 1 << 20 // 1 MB default -- matches deploy/config example
 	}
+	if cfg.DBPath == "" {
+		return nil, errors.New("db_path is required in config")
+	}
+	if cfg.TLSCert == "" {
+		return nil, errors.New("tls_cert is required in config")
+	}
+	if cfg.TLSKey == "" {
+		return nil, errors.New("tls_key is required in config")
+	}
 
 	return &cfg, nil
 }

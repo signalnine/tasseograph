@@ -218,6 +218,86 @@ llm_endpoints:
 	}
 }
 
+func TestLoadCollectorConfig_MissingTLSCertErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	// tls_cert omitted - server.go calls tls.LoadX509KeyPair which fails with
+	// a confusing 'open : no such file or directory' at startup.
+	content := []byte(`
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+tls_key: /etc/tasseograph/tls/key.pem
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key")
+
+	_, err := LoadCollectorConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for missing tls_cert, got nil")
+	}
+	if !strings.Contains(err.Error(), "tls_cert") {
+		t.Errorf("error %q does not mention tls_cert", err.Error())
+	}
+}
+
+func TestLoadCollectorConfig_MissingTLSKeyErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	content := []byte(`
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+tls_cert: /etc/tasseograph/tls/cert.pem
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key")
+
+	_, err := LoadCollectorConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for missing tls_key, got nil")
+	}
+	if !strings.Contains(err.Error(), "tls_key") {
+		t.Errorf("error %q does not mention tls_key", err.Error())
+	}
+}
+
+func TestLoadCollectorConfig_MissingDBPathErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	content := []byte(`
+listen_addr: ":9311"
+tls_cert: /etc/tasseograph/tls/cert.pem
+tls_key: /etc/tasseograph/tls/key.pem
+llm_endpoints:
+  - url: "https://inference.internal/v1"
+    model: "anthropic/haiku-4.5"
+    api_key_env: "INTERNAL_LLM_KEY"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test-api-key")
+
+	_, err := LoadCollectorConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for missing db_path, got nil")
+	}
+	if !strings.Contains(err.Error(), "db_path") {
+		t.Errorf("error %q does not mention db_path", err.Error())
+	}
+}
+
 func TestLoadCollectorConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "collector.yaml")
