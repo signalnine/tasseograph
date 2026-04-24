@@ -160,6 +160,73 @@ func TestLLMClientFallbackOnRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestLLMClientStripsMarkdownJSONFence(t *testing.T) {
+	// LLM wraps JSON in ```json ... ``` despite the prompt asking for JSON only.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{
+					"content": "```json\n{\"status\": \"ok\", \"issues\": []}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewLLMClient([]Endpoint{{URL: server.URL, Model: "m", APIKey: "k"}})
+	result, _, err := client.Analyze(context.Background(), []string{"line"})
+	if err != nil {
+		t.Fatalf("Analyze error: %v", err)
+	}
+	if result.Status != "ok" {
+		t.Errorf("Status = %q, want %q", result.Status, "ok")
+	}
+}
+
+func TestLLMClientStripsBareCodeFence(t *testing.T) {
+	// Bare ``` ... ``` with no language tag.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{
+					"content": "```\n{\"status\": \"warning\", \"issues\": [{\"summary\": \"x\", \"evidence\": \"y\"}]}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewLLMClient([]Endpoint{{URL: server.URL, Model: "m", APIKey: "k"}})
+	result, _, err := client.Analyze(context.Background(), []string{"line"})
+	if err != nil {
+		t.Fatalf("Analyze error: %v", err)
+	}
+	if result.Status != "warning" {
+		t.Errorf("Status = %q, want %q", result.Status, "warning")
+	}
+	if len(result.Issues) != 1 {
+		t.Errorf("Issues count = %d, want 1", len(result.Issues))
+	}
+}
+
+func TestLLMClientRejectsNonJSON(t *testing.T) {
+	// Genuinely malformed content (model refuses or replies in prose).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": "I'm sorry, I cannot help."}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewLLMClient([]Endpoint{{URL: server.URL, Model: "m", APIKey: "k"}})
+	_, _, err := client.Analyze(context.Background(), []string{"line"})
+	if err == nil {
+		t.Fatal("Expected parse error for non-JSON content, got nil")
+	}
+}
+
 func TestLLMClientAllUnavailable(t *testing.T) {
 	// All endpoints fail
 	endpoints := []Endpoint{

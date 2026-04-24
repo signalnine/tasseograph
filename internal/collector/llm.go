@@ -169,13 +169,32 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 		return nil, latency, fmt.Errorf("empty response from API")
 	}
 
-	// Parse the JSON from the message content
+	// Parse the JSON from the message content. Some models wrap structured
+	// output in markdown code fences despite prompts that say "JSON only".
+	content := stripCodeFence(apiResp.Choices[0].Message.Content)
 	var result protocol.AnalysisResult
-	if err := json.Unmarshal([]byte(apiResp.Choices[0].Message.Content), &result); err != nil {
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
 		return nil, latency, fmt.Errorf("failed to parse LLM response: %w", err)
 	}
 
 	return &result, latency, nil
+}
+
+// stripCodeFence removes a leading ``` (optionally followed by a language tag
+// like "json") and trailing ``` from s. Surrounding whitespace is trimmed.
+// If no fence is found, the trimmed string is returned unchanged.
+func stripCodeFence(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	s = strings.TrimPrefix(s, "```")
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		// Drop the language tag (or empty string) on the opening line.
+		s = s[nl+1:]
+	}
+	s = strings.TrimSuffix(strings.TrimRight(s, " \t\n\r"), "```")
+	return strings.TrimSpace(s)
 }
 
 // isUnavailableErr checks if an error indicates a transient availability issue
