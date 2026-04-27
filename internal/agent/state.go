@@ -30,13 +30,22 @@ func ReadLastTimestamp(path string) (time.Time, error) {
 	return ts, nil
 }
 
-// WriteLastTimestamp writes the timestamp to the state file.
-// Creates parent directories if needed.
+// WriteLastTimestamp writes the timestamp to the state file atomically.
+// Writes to <path>.tmp then renames into place; POSIX rename(2) guarantees
+// the destination is either the old content or the new content, never partial.
 func WriteLastTimestamp(path string, ts time.Time) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, []byte(ts.Format(timestampFormat)), 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(ts.Format(timestampFormat)), 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
