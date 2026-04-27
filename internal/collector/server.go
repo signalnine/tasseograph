@@ -66,6 +66,8 @@ func NewServer(cfg *config.CollectorConfig) (*Server, error) {
 
 // Run starts the HTTPS server
 func (s *Server) Run(ctx context.Context) error {
+	defer s.db.Close()
+
 	log.Printf("Collector starting on %s", s.cfg.ListenAddr)
 
 	// Load TLS cert
@@ -98,7 +100,6 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	s.db.Close()
 	return nil
 }
 

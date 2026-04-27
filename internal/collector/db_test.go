@@ -2,7 +2,10 @@
 package collector
 
 import (
+	"bytes"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,5 +92,45 @@ func TestDBStatusCounts(t *testing.T) {
 	}
 	if counts["warning"] != 1 {
 		t.Errorf("warning count = %d, want 1", counts["warning"])
+	}
+}
+
+func TestScanResultsLogsUnmarshalError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB error: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.db.Exec(`
+		INSERT INTO results (timestamp, hostname, status, issues, raw_dmesg, api_latency_ms)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, time.Now().Format(time.RFC3339), "corrupt-host", "warning", "{not valid json", "", 0)
+	if err != nil {
+		t.Fatalf("direct insert error: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(prevOutput)
+
+	results, err := db.QueryByHostname("corrupt-host", 10)
+	if err != nil {
+		t.Fatalf("QueryByHostname error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(strings.ToLower(logOutput), "unmarshal") {
+		t.Errorf("expected log to mention unmarshal error, got: %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "issues") {
+		t.Errorf("expected log to mention issues column, got: %q", logOutput)
 	}
 }

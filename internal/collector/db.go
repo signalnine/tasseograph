@@ -4,6 +4,7 @@ package collector
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"time"
 
 	"github.com/signalnine/tasseograph/internal/protocol"
@@ -146,7 +147,9 @@ func scanResults(rows *sql.Rows) ([]protocol.StoredResult, error) {
 		r.Timestamp, _ = time.Parse(time.RFC3339, tsStr)
 		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdStr)
 		if issuesJSON.Valid {
-			json.Unmarshal([]byte(issuesJSON.String), &r.Issues)
+			if err := json.Unmarshal([]byte(issuesJSON.String), &r.Issues); err != nil {
+				log.Printf("scanResults: failed to unmarshal issues column for row id=%d: %v", r.ID, err)
+			}
 		}
 		if rawDmesg.Valid {
 			r.RawDmesg = rawDmesg.String
