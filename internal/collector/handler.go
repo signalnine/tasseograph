@@ -78,9 +78,18 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, latency, llmErr = h.llm.Analyze(r.Context(), delta.Lines)
 	}
 
+	// Honor the agent's collection timestamp so retries/queued sends record
+	// when the data was gathered, not when we processed it. Reject obvious
+	// clock skew (or unset/zero values) and fall back to the collector clock.
+	now := time.Now()
+	ts := delta.Timestamp
+	if ts.IsZero() || ts.After(now.Add(5*time.Minute)) || ts.Before(now.Add(-24*time.Hour)) {
+		ts = now
+	}
+
 	// Store result
 	stored := &protocol.StoredResult{
-		Timestamp:    time.Now(),
+		Timestamp:    ts,
 		Hostname:     delta.Hostname,
 		RawDmesg:     strings.Join(delta.Lines, "\n"),
 		APILatencyMs: latency,

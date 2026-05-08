@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/signalnine/tasseograph/internal/protocol"
 )
@@ -98,5 +99,89 @@ func TestIngestHandlerSuccess(t *testing.T) {
 	results, _ := db.QueryByHostname("test-host", 1)
 	if len(results) != 1 {
 		t.Errorf("DB has %d results, want 1", len(results))
+	}
+}
+
+func TestIngestHandlerHonorsAgentTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	db, _ := NewDB(filepath.Join(dir, "test.db"))
+	defer db.Close()
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "ok", "issues": []}`}},
+			},
+		})
+	}))
+	defer mockLLM.Close()
+
+	llmClient := NewLLMClient([]Endpoint{{URL: mockLLM.URL, Model: "test", APIKey: "key"}}, 0)
+	handler := NewIngestHandler(db, llmClient, "secret", 1<<20)
+
+	agentTs := time.Now().Add(-2 * time.Minute).UTC().Truncate(time.Second)
+	delta := protocol.DmesgDelta{
+		Hostname:  "ts-host",
+		Timestamp: agentTs,
+		Lines:     []string{"[Mon Feb 3 12:00:00 2026] msg"},
+	}
+	body, _ := json.Marshal(delta)
+	req := httptest.NewRequest("POST", "/ingest", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Status = %d", rec.Code)
+	}
+	results, _ := db.QueryByHostname("ts-host", 1)
+	if len(results) != 1 {
+		t.Fatalf("DB has %d results, want 1", len(results))
+	}
+	if !results[0].Timestamp.Equal(agentTs) {
+		t.Errorf("Stored timestamp = %v, want %v (agent's)", results[0].Timestamp, agentTs)
+	}
+}
+
+func TestIngestHandlerRejectsSkewedTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	db, _ := NewDB(filepath.Join(dir, "test.db"))
+	defer db.Close()
+
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status": "ok", "issues": []}`}},
+			},
+		})
+	}))
+	defer mockLLM.Close()
+
+	llmClient := NewLLMClient([]Endpoint{{URL: mockLLM.URL, Model: "test", APIKey: "key"}}, 0)
+	handler := NewIngestHandler(db, llmClient, "secret", 1<<20)
+
+	// 10 years in the future - obvious clock skew, must be ignored.
+	skewed := time.Now().Add(10 * 365 * 24 * time.Hour)
+	delta := protocol.DmesgDelta{
+		Hostname:  "skew-host",
+		Timestamp: skewed,
+		Lines:     []string{"[Mon Feb 3 12:00:00 2026] msg"},
+	}
+	body, _ := json.Marshal(delta)
+	req := httptest.NewRequest("POST", "/ingest", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Status = %d", rec.Code)
+	}
+	results, _ := db.QueryByHostname("skew-host", 1)
+	if len(results) != 1 {
+		t.Fatalf("DB has %d results, want 1", len(results))
+	}
+	// Stored timestamp should be near now (collector clock), not the skewed value.
+	if delta := time.Since(results[0].Timestamp); delta > time.Minute || delta < -time.Minute {
+		t.Errorf("Stored timestamp = %v, expected fallback to ~now", results[0].Timestamp)
 	}
 }
