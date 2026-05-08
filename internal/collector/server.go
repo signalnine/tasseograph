@@ -37,7 +37,7 @@ func NewServer(cfg *config.CollectorConfig) (*Server, error) {
 			APIKey: ep.APIKey,
 		})
 	}
-	llm := NewLLMClient(endpoints)
+	llm := NewLLMClient(endpoints, cfg.MaxRetries)
 
 	handler := NewIngestHandler(db, llm, cfg.APIKey, cfg.MaxPayloadBytes)
 
@@ -80,6 +80,8 @@ func (s *Server) Run(ctx context.Context) error {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
+
+	startPruner(ctx, s.db, s.cfg.RetentionDays)
 
 	// Start server in goroutine
 	errCh := make(chan error, 1)
@@ -126,6 +128,8 @@ func (s *Server) RunAndGetAddr(ctx context.Context) (string, error) {
 	addr := ln.Addr().String()
 	log.Printf("Collector starting on %s", addr)
 
+	startPruner(ctx, s.db, s.cfg.RetentionDays)
+
 	// Start server in goroutine
 	go func() {
 		tlsLn := tls.NewListener(ln, s.server.TLSConfig)
@@ -145,4 +149,36 @@ func (s *Server) RunAndGetAddr(ctx context.Context) (string, error) {
 	}()
 
 	return addr, nil
+}
+
+// startPruner kicks off a background goroutine that deletes rows older than
+// retentionDays once at startup and then once a day until ctx is canceled.
+// retentionDays <= 0 disables pruning entirely.
+func startPruner(ctx context.Context, db *DB, retentionDays int) {
+	if retentionDays <= 0 {
+		return
+	}
+	go func() {
+		runPrune := func() {
+			n, err := db.PruneOlderThan(retentionDays)
+			if err != nil {
+				log.Printf("Retention prune error: %v", err)
+				return
+			}
+			if n > 0 {
+				log.Printf("Retention: pruned %d rows older than %d days", n, retentionDays)
+			}
+		}
+		runPrune()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runPrune()
+			}
+		}
+	}()
 }

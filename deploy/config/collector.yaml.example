@@ -13,6 +13,7 @@ llm_endpoints:
     api_key_env: "OPENAI_API_KEY"
 max_retries: 3
 max_payload_bytes: 1048576
+retention_days: 30  # 0 disables pruning
 tls_cert: /etc/tasseograph/tls/cert.pem
 tls_key: /etc/tasseograph/tls/key.pem
 # API keys via env vars: TASSEOGRAPH_API_KEY, INTERNAL_LLM_KEY, OPENAI_API_KEY

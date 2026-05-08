@@ -3,6 +3,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -33,6 +34,7 @@ type CollectorConfig struct {
 	DBPath          string        `yaml:"db_path"`
 	MaxRetries      int           `yaml:"max_retries"`
 	MaxPayloadBytes int64         `yaml:"max_payload_bytes"`
+	RetentionDays   int           `yaml:"retention_days"` // 0 disables pruning
 	TLSCert         string        `yaml:"tls_cert"`
 	TLSKey          string        `yaml:"tls_key"`
 	LLMEndpoints    []LLMEndpoint `yaml:"llm_endpoints"` // fallback chain
@@ -59,9 +61,15 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		cfg.Hostname = hostname
 	}
 
-	// Default hostname to os.Hostname if not set
+	// Default hostname to os.Hostname if not set. An empty hostname downstream
+	// would silently produce unfilterable rows in the collector DB and useless
+	// QueryByHostname results, so refuse to start instead of guessing.
 	if cfg.Hostname == "" {
-		cfg.Hostname, _ = os.Hostname()
+		h, err := os.Hostname()
+		if err != nil || h == "" {
+			return nil, fmt.Errorf("hostname not set in config and os.Hostname() failed: %w", err)
+		}
+		cfg.Hostname = h
 	}
 
 	// Validate required fields
@@ -117,6 +125,9 @@ func LoadCollectorConfig(path string) (*CollectorConfig, error) {
 	}
 	if cfg.MaxPayloadBytes == 0 {
 		cfg.MaxPayloadBytes = 1 << 20 // 1 MB default -- matches deploy/config example
+	}
+	if cfg.RetentionDays < 0 {
+		return nil, errors.New("retention_days must be >= 0 (0 disables pruning)")
 	}
 	if cfg.DBPath == "" {
 		return nil, errors.New("db_path is required in config")

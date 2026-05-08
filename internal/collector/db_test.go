@@ -95,6 +95,65 @@ func TestDBStatusCounts(t *testing.T) {
 	}
 }
 
+func TestPruneOlderThan(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB error: %v", err)
+	}
+	defer db.Close()
+
+	// Two rows: one with a created_at well outside the retention window,
+	// one with the default created_at (now). Direct INSERT lets us set
+	// created_at without waiting real wall-clock time.
+	_, err = db.db.Exec(`
+		INSERT INTO results (timestamp, hostname, status, issues, raw_dmesg, api_latency_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-40 days'))
+	`, time.Now().Format(time.RFC3339), "old-host", "ok", "[]", "", 0)
+	if err != nil {
+		t.Fatalf("seed old row error: %v", err)
+	}
+	if err := db.InsertResult(&protocol.StoredResult{Timestamp: time.Now(), Hostname: "fresh-host", Status: "ok"}); err != nil {
+		t.Fatalf("InsertResult: %v", err)
+	}
+
+	pruned, err := db.PruneOlderThan(30)
+	if err != nil {
+		t.Fatalf("PruneOlderThan error: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1", pruned)
+	}
+
+	if got, _ := db.QueryByHostname("old-host", 10); len(got) != 0 {
+		t.Errorf("old-host rows = %d, want 0 after prune", len(got))
+	}
+	if got, _ := db.QueryByHostname("fresh-host", 10); len(got) != 1 {
+		t.Errorf("fresh-host rows = %d, want 1 (unchanged)", len(got))
+	}
+
+	// Disabled: 0 days = no-op even if there is old data.
+	_, err = db.db.Exec(`
+		INSERT INTO results (timestamp, hostname, status, issues, raw_dmesg, api_latency_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-100 days'))
+	`, time.Now().Format(time.RFC3339), "ancient-host", "ok", "[]", "", 0)
+	if err != nil {
+		t.Fatalf("seed ancient row error: %v", err)
+	}
+	pruned, err = db.PruneOlderThan(0)
+	if err != nil {
+		t.Fatalf("PruneOlderThan(0) error: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned with retention=0 = %d, want 0", pruned)
+	}
+	if got, _ := db.QueryByHostname("ancient-host", 10); len(got) != 1 {
+		t.Errorf("ancient-host rows after disabled prune = %d, want 1", len(got))
+	}
+}
+
 func TestScanResultsLogsUnmarshalError(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

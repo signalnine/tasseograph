@@ -4,6 +4,7 @@ package collector
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -72,6 +73,23 @@ func (d *DB) InsertResult(r *protocol.StoredResult) error {
 	`, r.Timestamp.Format(time.RFC3339), r.Hostname, r.Status, string(issuesJSON), r.RawDmesg, r.APILatencyMs)
 
 	return err
+}
+
+// PruneOlderThan deletes rows whose created_at is older than the given number
+// of days. Returns the number of rows removed. days <= 0 is a no-op so callers
+// can pass an unconfigured RetentionDays without a guard.
+func (d *DB) PruneOlderThan(days int) (int64, error) {
+	if days <= 0 {
+		return 0, nil
+	}
+	res, err := d.db.Exec(
+		`DELETE FROM results WHERE created_at < datetime('now', ?)`,
+		fmt.Sprintf("-%d days", days),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // QueryByHostname returns recent results for a host
