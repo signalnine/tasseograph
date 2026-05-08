@@ -75,7 +75,7 @@ func TestIngestHandlerSuccess(t *testing.T) {
 	defer mockLLM.Close()
 
 	endpoints := []Endpoint{{URL: mockLLM.URL, Model: "test", APIKey: "key"}}
-	llmClient := NewLLMClient(endpoints)
+	llmClient := NewLLMClient(endpoints, 0)
 	handler := NewIngestHandler(db, llmClient, "secret", 1<<20)
 
 	delta := protocol.DmesgDelta{

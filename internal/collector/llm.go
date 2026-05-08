@@ -35,6 +35,11 @@ If nothing notable, return {"status": "ok", "issues": []}`
 // ErrLLMUnavailable indicates all LLM endpoints are down
 var ErrLLMUnavailable = errors.New("all LLM endpoints unavailable")
 
+// maxLLMResponseBytes caps the size of an LLM response body so a misbehaving
+// or compromised endpoint cannot exhaust collector memory. Real responses are
+// bounded by max_tokens=1024 in the request and run well under 100KB.
+const maxLLMResponseBytes = 1 << 20 // 1 MiB
+
 // Endpoint represents a single LLM provider
 type Endpoint struct {
 	URL    string
@@ -44,14 +49,22 @@ type Endpoint struct {
 
 // LLMClient calls LLM inference APIs with fallback support (OpenAI-compatible format)
 type LLMClient struct {
-	endpoints []Endpoint
-	client    *http.Client
+	endpoints  []Endpoint
+	maxRetries int
+	client     *http.Client
 }
 
-// NewLLMClient creates a new LLM client with fallback chain
-func NewLLMClient(endpoints []Endpoint) *LLMClient {
+// NewLLMClient creates a new LLM client with fallback chain.
+// maxRetries is the number of additional in-endpoint retries on transient
+// failures (5xx, 408, 429, connection errors) before falling through to the
+// next endpoint. 0 preserves the original "one shot per endpoint" behavior.
+func NewLLMClient(endpoints []Endpoint, maxRetries int) *LLMClient {
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 	return &LLMClient{
-		endpoints: endpoints,
+		endpoints:  endpoints,
+		maxRetries: maxRetries,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
@@ -74,8 +87,24 @@ func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.Anal
 	var totalLatency int64
 
 	for i, ep := range c.endpoints {
-		result, latency, err := c.tryEndpoint(ctx, ep, lines)
-		totalLatency += latency
+		var (
+			result *protocol.AnalysisResult
+			err    error
+		)
+		// One initial attempt plus up to maxRetries retries against this
+		// endpoint, but only retry on transient (availability) errors.
+		for attempt := 0; attempt <= c.maxRetries; attempt++ {
+			var attemptLatency int64
+			result, attemptLatency, err = c.tryEndpoint(ctx, ep, lines)
+			totalLatency += attemptLatency
+
+			if err == nil || !isUnavailableErr(err) {
+				break
+			}
+			if attempt < c.maxRetries {
+				log.Printf("LLM endpoint %d (%s) attempt %d failed: %v, retrying...", i+1, ep.Model, attempt+1, err)
+			}
+		}
 
 		if err == nil {
 			if i > 0 {
@@ -86,7 +115,7 @@ func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.Anal
 
 		lastErr = err
 		if isUnavailableErr(err) {
-			log.Printf("LLM endpoint %d (%s) unavailable: %v, trying next...", i+1, ep.Model, err)
+			log.Printf("LLM endpoint %d (%s) unavailable after %d attempts: %v, trying next...", i+1, ep.Model, c.maxRetries+1, err)
 			continue
 		}
 
@@ -148,8 +177,10 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 		return nil, latency, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
+	limitedBody := io.LimitReader(resp.Body, maxLLMResponseBytes)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(limitedBody)
 		return nil, latency, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -161,7 +192,7 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+	if err := json.NewDecoder(limitedBody).Decode(&apiResp); err != nil {
 		return nil, latency, err
 	}
 
