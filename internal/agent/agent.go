@@ -48,7 +48,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	// Run immediately on start
-	if err := a.collect(); err != nil {
+	if err := a.collect(ctx); err != nil {
 		log.Printf("Collection error: %v", err)
 	}
 
@@ -58,14 +58,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			log.Println("Agent shutting down")
 			return nil
 		case <-ticker.C:
-			if err := a.collect(); err != nil {
+			if err := a.collect(ctx); err != nil {
 				log.Printf("Collection error: %v", err)
 			}
 		}
 	}
 }
 
-func (a *Agent) collect() error {
+func (a *Agent) collect(ctx context.Context) error {
 	// Read last timestamp
 	lastSeen, err := ReadLastTimestamp(a.cfg.StateFile)
 	if err != nil {
@@ -101,7 +101,7 @@ func (a *Agent) collect() error {
 		Lines:     newLines,
 	}
 
-	if err := a.send(delta); err != nil {
+	if err := a.send(ctx, delta); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
 
@@ -113,13 +113,13 @@ func (a *Agent) collect() error {
 	return nil
 }
 
-func (a *Agent) send(delta protocol.DmesgDelta) error {
+func (a *Agent) send(ctx context.Context, delta protocol.DmesgDelta) error {
 	body, err := json.Marshal(delta)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", a.cfg.CollectorURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.cfg.CollectorURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
