@@ -76,27 +76,36 @@ func NewLLMClient(endpoints []Endpoint, maxRetries int) *LLMClient {
 	}
 }
 
+// AnalysisMeta is per-call metadata returned alongside the parsed result.
+// Provider/Model come from the upstream's response body when available
+// (OpenRouter returns both); empty strings for endpoints that don't.
+type AnalysisMeta struct {
+	LatencyMs int64
+	Provider  string
+	Model     string
+}
+
 // Analyze sends dmesg lines to the LLM and returns the analysis.
 // Tries each endpoint in order; returns ErrLLMUnavailable only if ALL fail.
-func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.AnalysisResult, int64, error) {
+func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.AnalysisResult, AnalysisMeta, error) {
 	if len(c.endpoints) == 0 {
-		return nil, 0, errors.New("no LLM endpoints configured")
+		return nil, AnalysisMeta{}, errors.New("no LLM endpoints configured")
 	}
 
 	var lastErr error
-	var totalLatency int64
+	var meta AnalysisMeta
 
 	for i, ep := range c.endpoints {
 		var (
-			result *protocol.AnalysisResult
-			err    error
+			result      *protocol.AnalysisResult
+			attemptMeta AnalysisMeta
+			err         error
 		)
 		// One initial attempt plus up to maxRetries retries against this
 		// endpoint, but only retry on transient (availability) errors.
 		for attempt := 0; attempt <= c.maxRetries; attempt++ {
-			var attemptLatency int64
-			result, attemptLatency, err = c.tryEndpoint(ctx, ep, lines)
-			totalLatency += attemptLatency
+			result, attemptMeta, err = c.tryEndpoint(ctx, ep, lines)
+			meta.LatencyMs += attemptMeta.LatencyMs
 
 			if err == nil || !isUnavailableErr(err) {
 				break
@@ -110,7 +119,12 @@ func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.Anal
 			if i > 0 {
 				log.Printf("LLM fallback: endpoint %d (%s) succeeded after %d failures", i+1, ep.Model, i)
 			}
-			return result, totalLatency, nil
+			// Adopt the successful attempt's provider/model; the accumulated
+			// latency stays so the row reflects total wall time including
+			// any failed primary attempts.
+			meta.Provider = attemptMeta.Provider
+			meta.Model = attemptMeta.Model
+			return result, meta, nil
 		}
 
 		lastErr = err
@@ -120,14 +134,14 @@ func (c *LLMClient) Analyze(ctx context.Context, lines []string) (*protocol.Anal
 		}
 
 		// Non-availability error (e.g., parse error) - don't try fallback
-		return nil, totalLatency, err
+		return nil, meta, err
 	}
 
 	// All endpoints failed
-	return nil, totalLatency, fmt.Errorf("%w: %v", ErrLLMUnavailable, lastErr)
+	return nil, meta, fmt.Errorf("%w: %v", ErrLLMUnavailable, lastErr)
 }
 
-func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string) (*protocol.AnalysisResult, int64, error) {
+func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string) (*protocol.AnalysisResult, AnalysisMeta, error) {
 	start := time.Now()
 
 	// Build request body (OpenAI Chat Completions format)
@@ -142,13 +156,13 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, 0, err
+		return nil, AnalysisMeta{}, err
 	}
 
 	url := strings.TrimSuffix(ep.URL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, 0, err
+		return nil, AnalysisMeta{}, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -156,17 +170,16 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		latency := time.Since(start).Milliseconds()
-		// Connection errors are "unavailable"
+		meta := AnalysisMeta{LatencyMs: time.Since(start).Milliseconds()}
 		var netErr net.Error
 		if errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, latency, fmt.Errorf("connection failed: %w", err)
+			return nil, meta, fmt.Errorf("connection failed: %w", err)
 		}
-		return nil, latency, err
+		return nil, meta, err
 	}
 	defer resp.Body.Close()
 
-	latency := time.Since(start).Milliseconds()
+	meta := AnalysisMeta{LatencyMs: time.Since(start).Milliseconds()}
 
 	// Transient errors - try next endpoint
 	if resp.StatusCode == http.StatusRequestTimeout ||
@@ -174,30 +187,35 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 		resp.StatusCode == http.StatusBadGateway ||
 		resp.StatusCode == http.StatusServiceUnavailable ||
 		resp.StatusCode == http.StatusGatewayTimeout {
-		return nil, latency, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, meta, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	limitedBody := io.LimitReader(resp.Body, maxLLMResponseBytes)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(limitedBody)
-		return nil, latency, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return nil, meta, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse OpenAI response format
+	// Parse the OpenAI-compatible envelope plus the optional model/provider
+	// fields that OpenRouter (and a few other gateways) tack on.
 	var apiResp struct {
-		Choices []struct {
+		Model    string `json:"model"`
+		Provider string `json:"provider"`
+		Choices  []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(limitedBody).Decode(&apiResp); err != nil {
-		return nil, latency, err
+		return nil, meta, err
 	}
+	meta.Model = apiResp.Model
+	meta.Provider = apiResp.Provider
 
 	if len(apiResp.Choices) == 0 {
-		return nil, latency, fmt.Errorf("empty response from API")
+		return nil, meta, fmt.Errorf("empty response from API")
 	}
 
 	// Parse the JSON from the message content. Some models wrap structured
@@ -205,10 +223,10 @@ func (c *LLMClient) tryEndpoint(ctx context.Context, ep Endpoint, lines []string
 	content := stripCodeFence(apiResp.Choices[0].Message.Content)
 	var result protocol.AnalysisResult
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil, latency, fmt.Errorf("failed to parse LLM response: %w", err)
+		return nil, meta, fmt.Errorf("failed to parse LLM response: %w", err)
 	}
 
-	return &result, latency, nil
+	return &result, meta, nil
 }
 
 // stripCodeFence removes a leading ``` (optionally followed by a language tag

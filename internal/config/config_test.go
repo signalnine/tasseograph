@@ -349,3 +349,129 @@ llm_endpoints:
 		t.Errorf("Endpoint[1].APIKey = %q, want %q", cfg.LLMEndpoints[1].APIKey, "openai-secret")
 	}
 }
+
+// summaryBaseConfig writes a minimal but valid collector YAML to a temp file
+// and returns the path. Individual tests append summary/SMTP knobs to exercise
+// the new validation rules.
+func summaryBaseConfig(t *testing.T, extra string) string {
+	t.Helper()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "collector.yaml")
+	content := `
+listen_addr: ":9311"
+db_path: /var/lib/tasseograph/results.db
+tls_cert: /etc/tasseograph/tls/cert.pem
+tls_key: /etc/tasseograph/tls/key.pem
+llm_endpoints:
+  - url: "https://openrouter.ai/api/v1"
+    model: "google/gemini-3-flash-preview"
+    api_key_env: "OPENROUTER_API_KEY"
+` + extra
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASSEOGRAPH_API_KEY", "test")
+	t.Setenv("OPENROUTER_API_KEY", "or-test")
+	return configPath
+}
+
+func TestLoadCollectorConfig_SummaryDisabledByDefault(t *testing.T) {
+	// Omitting summary_interval entirely (zero value) must keep the digest off
+	// and must NOT trip any SMTP-required validation.
+	cfg, err := LoadCollectorConfig(summaryBaseConfig(t, ""))
+	if err != nil {
+		t.Fatalf("LoadCollectorConfig: %v", err)
+	}
+	if cfg.SummaryInterval != 0 {
+		t.Errorf("SummaryInterval = %v, want 0 (disabled)", cfg.SummaryInterval)
+	}
+}
+
+func TestLoadCollectorConfig_SummaryRequiresSMTP(t *testing.T) {
+	// summary_interval set without SMTP details must error so a misconfigured
+	// install fails at startup rather than silently never sending a digest.
+	cases := map[string]string{
+		"missing host": `
+summary_interval: 24h
+smtp_from: a@b
+smtp_to: c@d
+`,
+		"missing from": `
+summary_interval: 24h
+smtp_host: smtp.example:587
+smtp_to: c@d
+`,
+		"missing to": `
+summary_interval: 24h
+smtp_host: smtp.example:587
+smtp_from: a@b
+`,
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadCollectorConfig(summaryBaseConfig(t, extra))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestLoadCollectorConfig_SummaryIntervalTooShort(t *testing.T) {
+	// A 30s interval would flood the inbox; require >= 1h.
+	_, err := LoadCollectorConfig(summaryBaseConfig(t, `
+summary_interval: 30s
+smtp_host: smtp.example:587
+smtp_from: a@b
+smtp_to: c@d
+`))
+	if err == nil {
+		t.Fatal("expected error for sub-hour summary_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "summary_interval") {
+		t.Errorf("error %q does not mention summary_interval", err.Error())
+	}
+}
+
+func TestLoadCollectorConfig_SummaryResolvesPasswordAndDefaults(t *testing.T) {
+	// Password env var resolution + default-username behavior + default
+	// alert_error_rate threshold all live in the same validation block.
+	t.Setenv("FAKE_SMTP_PASSWORD", "hunter2")
+	cfg, err := LoadCollectorConfig(summaryBaseConfig(t, `
+summary_interval: 24h
+smtp_host: smtp.example.com:587
+smtp_from: a@example.com
+smtp_to: ops@example.com
+smtp_password_env: FAKE_SMTP_PASSWORD
+smtp_starttls: true
+`))
+	if err != nil {
+		t.Fatalf("LoadCollectorConfig: %v", err)
+	}
+	if cfg.SMTPPassword != "hunter2" {
+		t.Errorf("SMTPPassword = %q, want %q", cfg.SMTPPassword, "hunter2")
+	}
+	if cfg.SMTPUsername != "a@example.com" {
+		t.Errorf("SMTPUsername = %q, want default to SMTPFrom (a@example.com)", cfg.SMTPUsername)
+	}
+	if cfg.AlertErrorRate != 0.5 {
+		t.Errorf("AlertErrorRate = %v, want default 0.5", cfg.AlertErrorRate)
+	}
+}
+
+func TestLoadCollectorConfig_AlertErrorRateOutOfRange(t *testing.T) {
+	for _, val := range []string{"-0.1", "1.5"} {
+		t.Run(val, func(t *testing.T) {
+			_, err := LoadCollectorConfig(summaryBaseConfig(t, `
+summary_interval: 24h
+smtp_host: smtp.example:587
+smtp_from: a@b
+smtp_to: c@d
+alert_error_rate: `+val+`
+`))
+			if err == nil {
+				t.Fatal("expected error for out-of-range alert_error_rate, got nil")
+			}
+		})
+	}
+}

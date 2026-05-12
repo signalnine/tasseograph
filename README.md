@@ -103,8 +103,8 @@ sqlite3 /var/lib/tasseograph/results.db \
 | Field | Description | Default |
 |-------|-------------|---------|
 | `collector_url` | Collector endpoint | required |
-| `poll_interval` | How often to check dmesg | `5m` |
-| `state_file` | Tracks last-seen timestamp | `/var/lib/tasseograph/last_timestamp` |
+| `poll_interval` | How often to check dmesg (e.g. `5m`) | required |
+| `state_file` | Tracks last-seen timestamp | required |
 | `hostname` | Override hostname | `os.Hostname()` |
 | `tls_skip_verify` | Skip TLS verification | `false` |
 

@@ -31,5 +31,10 @@ type StoredResult struct {
 	Issues       []Issue   `json:"issues"`
 	RawDmesg     string    `json:"raw_dmesg"`
 	APILatencyMs int64     `json:"api_latency_ms"`
-	CreatedAt    time.Time `json:"created_at"`
+	// Provider is the upstream that served the request (e.g. "Google",
+	// "Amazon Bedrock"). Empty for endpoints that don't expose it. OpenRouter
+	// returns this so we can see when the fallback chain swaps providers.
+	Provider  string    `json:"provider,omitempty"`
+	Model     string    `json:"model,omitempty"` // resolved model id from the upstream response
+	CreatedAt time.Time `json:"created_at"`
 }

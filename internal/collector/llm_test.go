@@ -57,7 +57,7 @@ func TestLLMClientAnalyze(t *testing.T) {
 
 	endpoints := []Endpoint{{URL: server.URL, Model: "test-model", APIKey: "test-key"}}
 	client := NewLLMClient(endpoints, 0)
-	result, latency, err := client.Analyze(context.Background(), []string{"[Mon Feb 3 12:00:00 2026] Normal message"})
+	result, meta, err := client.Analyze(context.Background(), []string{"[Mon Feb 3 12:00:00 2026] Normal message"})
 	if err != nil {
 		t.Fatalf("Analyze error: %v", err)
 	}
@@ -65,8 +65,67 @@ func TestLLMClientAnalyze(t *testing.T) {
 		t.Errorf("Status = %q, want %q", result.Status, "ok")
 	}
 	// Latency can be 0 for very fast mock responses (sub-millisecond)
-	if latency < 0 {
-		t.Errorf("Latency = %d, want >= 0", latency)
+	if meta.LatencyMs < 0 {
+		t.Errorf("Latency = %d, want >= 0", meta.LatencyMs)
+	}
+}
+
+// TestLLMClientCapturesProviderAndModel verifies that we pluck the optional
+// provider/model fields out of an OpenRouter-style response.
+func TestLLMClientCapturesProviderAndModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"model":    "google/gemini-3-flash-preview-20251217",
+			"provider": "Google",
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status":"ok","issues":[]}`}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewLLMClient([]Endpoint{{URL: server.URL, Model: "google/gemini-3-flash-preview", APIKey: "k"}}, 0)
+	_, meta, err := client.Analyze(context.Background(), []string{"line"})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if meta.Provider != "Google" {
+		t.Errorf("Provider = %q, want %q", meta.Provider, "Google")
+	}
+	if meta.Model != "google/gemini-3-flash-preview-20251217" {
+		t.Errorf("Model = %q, want resolved upstream model", meta.Model)
+	}
+}
+
+// TestLLMClientFallbackCapturesSuccessfulProvider verifies that when a
+// fallback endpoint succeeds, we report ITS provider, not the failed primary.
+func TestLLMClientFallbackCapturesSuccessfulProvider(t *testing.T) {
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer failServer.Close()
+
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"model":    "anthropic/claude-4.5-haiku-20251001",
+			"provider": "Amazon Bedrock",
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"content": `{"status":"ok","issues":[]}`}},
+			},
+		})
+	}))
+	defer successServer.Close()
+
+	client := NewLLMClient([]Endpoint{
+		{URL: failServer.URL, Model: "primary", APIKey: "k1"},
+		{URL: successServer.URL, Model: "fallback", APIKey: "k2"},
+	}, 0)
+	_, meta, err := client.Analyze(context.Background(), []string{"line"})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if meta.Provider != "Amazon Bedrock" {
+		t.Errorf("Provider = %q, want fallback's provider", meta.Provider)
 	}
 }
 

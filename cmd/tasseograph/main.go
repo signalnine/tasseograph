@@ -17,6 +17,7 @@ import (
 var (
 	agentConfigPath     string
 	collectorConfigPath string
+	sendSummaryNow      bool
 )
 
 var rootCmd = &cobra.Command{
@@ -51,6 +52,23 @@ var collectorCmd = &cobra.Command{
 			return fmt.Errorf("load config: %w", err)
 		}
 
+		// --send-summary-now: build and email one digest covering the
+		// configured window, then exit. Lets operators validate SMTP
+		// without waiting for the next scheduled tick.
+		if sendSummaryNow {
+			db, err := collector.NewDB(cfg.DBPath)
+			if err != nil {
+				return fmt.Errorf("open db: %w", err)
+			}
+			defer db.Close()
+			subj, err := collector.SendSummaryOnce(cfg, db)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "summary sent: %s\n", subj)
+			return nil
+		}
+
 		srv, err := collector.NewServer(cfg)
 		if err != nil {
 			return err
@@ -66,6 +84,7 @@ var collectorCmd = &cobra.Command{
 func init() {
 	agentCmd.Flags().StringVarP(&agentConfigPath, "config", "c", "/etc/tasseograph/agent.yaml", "path to config file")
 	collectorCmd.Flags().StringVarP(&collectorConfigPath, "config", "c", "/etc/tasseograph/collector.yaml", "path to config file")
+	collectorCmd.Flags().BoolVar(&sendSummaryNow, "send-summary-now", false, "build and email one digest covering summary_interval, then exit")
 
 	rootCmd.AddCommand(agentCmd)
 	rootCmd.AddCommand(collectorCmd)

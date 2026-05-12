@@ -143,6 +143,38 @@ func TestIngestHandlerHonorsAgentTimestamp(t *testing.T) {
 	}
 }
 
+func TestIngestHandlerRejectsEmptyHostname(t *testing.T) {
+	// The agent refuses to start without a hostname (config validation), but
+	// a leaked bearer token or a manual POST could still send hostname="".
+	// Such rows are unreachable via QueryByHostname; the handler must reject
+	// them at the wire rather than storing unfilterable data.
+	dir := t.TempDir()
+	db, _ := NewDB(filepath.Join(dir, "test.db"))
+	defer db.Close()
+
+	handler := NewIngestHandler(db, nil, "secret", 1<<20)
+
+	delta := protocol.DmesgDelta{
+		Hostname: "",
+		Lines:    []string{"[Mon Feb 3 12:00:00 2026] msg"},
+	}
+	body, _ := json.Marshal(delta)
+	req := httptest.NewRequest("POST", "/ingest", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	// Nothing should be stored.
+	results, _ := db.QueryByHostname("", 10)
+	if len(results) != 0 {
+		t.Errorf("DB has %d rows for empty hostname, want 0", len(results))
+	}
+}
+
 func TestIngestHandlerRejectsSkewedTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	db, _ := NewDB(filepath.Join(dir, "test.db"))

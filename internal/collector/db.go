@@ -40,6 +40,8 @@ func NewDB(path string) (*DB, error) {
 		issues TEXT,
 		raw_dmesg TEXT,
 		api_latency_ms INTEGER,
+		provider TEXT,
+		model TEXT,
 		created_at TEXT DEFAULT (datetime('now'))
 	);
 	CREATE INDEX IF NOT EXISTS idx_results_hostname ON results(hostname);
@@ -52,7 +54,38 @@ func NewDB(path string) (*DB, error) {
 		return nil, err
 	}
 
+	// Migration for installations whose results table predates the
+	// provider/model columns. SQLite has no idempotent ADD COLUMN, so
+	// gate each one on pragma_table_info.
+	if err := addColumnIfMissing(db, "results", "provider", "TEXT"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := addColumnIfMissing(db, "results", "model", "TEXT"); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return &DB{db: db}, nil
+}
+
+// addColumnIfMissing is a portable "ALTER TABLE ... ADD COLUMN IF NOT EXISTS"
+// for SQLite (which lacks that syntax). Safe to call against a freshly-built
+// schema, where it's a no-op.
+func addColumnIfMissing(db *sql.DB, table, col, colType string) error {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, col,
+	).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, colType))
+	return err
 }
 
 // Close closes the database connection
@@ -68,9 +101,9 @@ func (d *DB) InsertResult(r *protocol.StoredResult) error {
 	}
 
 	_, err = d.db.Exec(`
-		INSERT INTO results (timestamp, hostname, status, issues, raw_dmesg, api_latency_ms)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, r.Timestamp.Format(time.RFC3339), r.Hostname, r.Status, string(issuesJSON), r.RawDmesg, r.APILatencyMs)
+		INSERT INTO results (timestamp, hostname, status, issues, raw_dmesg, api_latency_ms, provider, model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.Timestamp.Format(time.RFC3339), r.Hostname, r.Status, string(issuesJSON), r.RawDmesg, r.APILatencyMs, r.Provider, r.Model)
 
 	return err
 }
@@ -92,10 +125,14 @@ func (d *DB) PruneOlderThan(days int) (int64, error) {
 	return res.RowsAffected()
 }
 
+// resultColumns is the SELECT list shared by every query that hydrates a
+// StoredResult. Keep in sync with scanResults's Scan call.
+const resultColumns = `id, timestamp, hostname, status, issues, raw_dmesg, api_latency_ms, provider, model, created_at`
+
 // QueryByHostname returns recent results for a host
 func (d *DB) QueryByHostname(hostname string, limit int) ([]protocol.StoredResult, error) {
 	rows, err := d.db.Query(`
-		SELECT id, timestamp, hostname, status, issues, raw_dmesg, api_latency_ms, created_at
+		SELECT `+resultColumns+`
 		FROM results
 		WHERE hostname = ?
 		ORDER BY timestamp DESC
@@ -112,7 +149,7 @@ func (d *DB) QueryByHostname(hostname string, limit int) ([]protocol.StoredResul
 // QueryNonOK returns recent non-ok results
 func (d *DB) QueryNonOK(limit int) ([]protocol.StoredResult, error) {
 	rows, err := d.db.Query(`
-		SELECT id, timestamp, hostname, status, issues, raw_dmesg, api_latency_ms, created_at
+		SELECT `+resultColumns+`
 		FROM results
 		WHERE status != 'ok'
 		ORDER BY timestamp DESC
@@ -156,10 +193,18 @@ func scanResults(rows *sql.Rows) ([]protocol.StoredResult, error) {
 		var issuesJSON sql.NullString
 		var rawDmesg sql.NullString
 		var latency sql.NullInt64
+		var provider sql.NullString
+		var model sql.NullString
 
-		err := rows.Scan(&r.ID, &tsStr, &r.Hostname, &r.Status, &issuesJSON, &rawDmesg, &latency, &createdStr)
+		err := rows.Scan(&r.ID, &tsStr, &r.Hostname, &r.Status, &issuesJSON, &rawDmesg, &latency, &provider, &model, &createdStr)
 		if err != nil {
 			return nil, err
+		}
+		if provider.Valid {
+			r.Provider = provider.String
+		}
+		if model.Valid {
+			r.Model = model.String
 		}
 
 		r.Timestamp, _ = time.Parse(time.RFC3339, tsStr)

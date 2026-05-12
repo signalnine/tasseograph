@@ -82,6 +82,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	startPruner(ctx, s.db, s.cfg.RetentionDays)
+	startSummary(ctx, s.db, s.cfg)
 
 	// Start server in goroutine
 	errCh := make(chan error, 1)
@@ -129,6 +130,7 @@ func (s *Server) RunAndGetAddr(ctx context.Context) (string, error) {
 	log.Printf("Collector starting on %s", addr)
 
 	startPruner(ctx, s.db, s.cfg.RetentionDays)
+	startSummary(ctx, s.db, s.cfg)
 
 	// Start server in goroutine
 	go func() {
@@ -149,6 +151,51 @@ func (s *Server) RunAndGetAddr(ctx context.Context) (string, error) {
 	}()
 
 	return addr, nil
+}
+
+// SendSummaryOnce builds and dispatches a single email digest covering the
+// last cfg.SummaryInterval. Returns the subject sent on success; exposed so
+// CLI flags (e.g. --send-summary-now) and the periodic ticker share one path.
+func SendSummaryOnce(cfg *config.CollectorConfig, db *DB) (string, error) {
+	if cfg.SummaryInterval <= 0 {
+		return "", fmt.Errorf("summary_interval must be > 0")
+	}
+	now := time.Now()
+	subject, body, err := BuildSummary(db, now.Add(-cfg.SummaryInterval), now, cfg.AlertErrorRate)
+	if err != nil {
+		return "", fmt.Errorf("build summary: %w", err)
+	}
+	if err := SendMail(cfg, subject, body); err != nil {
+		return "", fmt.Errorf("send mail: %w", err)
+	}
+	return subject, nil
+}
+
+// startSummary fires a digest on every cfg.SummaryInterval tick. Unlike
+// startPruner it does NOT run immediately on startup -- otherwise a flapping
+// collector would spam the inbox. Operators trigger an immediate test send
+// with `tasseograph collector --send-summary-now`.
+func startSummary(ctx context.Context, db *DB, cfg *config.CollectorConfig) {
+	if cfg.SummaryInterval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(cfg.SummaryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				subj, err := SendSummaryOnce(cfg, db)
+				if err != nil {
+					log.Printf("Summary error: %v", err)
+					continue
+				}
+				log.Printf("Summary sent: %s", subj)
+			}
+		}
+	}()
 }
 
 // startPruner kicks off a background goroutine that deletes rows older than

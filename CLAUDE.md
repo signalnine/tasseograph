@@ -21,12 +21,23 @@ Tasseograph is a dmesg anomaly detection system that uses LLM analysis to identi
 ## Build & Test
 
 ```bash
-make test          # Run all tests
-make build         # Build for current platform
+make build         # Build for current platform -> dist/tasseograph
 make build-linux   # Build linux/amd64 and linux/arm64
+make test          # go test ./...
+make test-cover    # tests with coverage profile -> coverage.out
+make lint          # golangci-lint if present, else go vet ./...
+make fmt           # go fmt ./...
+make clean         # remove dist/ and coverage.out
 ```
 
-Output binaries: `dist/tasseograph-linux-{amd64,arm64}`
+Run a single test:
+
+```bash
+go test ./internal/collector -run TestIngestHandler_Auth
+go test ./internal/agent    -run TestParseDmesgTimestamp -v
+```
+
+Cross-compiled output: `dist/tasseograph-linux-{amd64,arm64}`. SQLite is pure-Go (`modernc.org/sqlite`), so no CGO is required for cross builds.
 
 ## Configuration
 
@@ -44,6 +55,9 @@ listen_addr: ":9311"
 db_path: /var/lib/tasseograph/results.db
 tls_cert: /etc/tasseograph/tls/cert.pem
 tls_key: /etc/tasseograph/tls/key.pem
+max_retries: 0          # extra in-endpoint retries on transient failures (5xx/408/429/conn)
+max_payload_bytes: 0    # 0 -> 1 MiB default
+retention_days: 0       # 0 disables the background pruner
 llm_endpoints:  # fallback chain - tries in order
   - url: "https://inference.internal/v1"
     model: "anthropic/haiku-4.5"
@@ -73,12 +87,17 @@ deploy/
 
 ## Key Design Decisions
 
-- **LLM format**: OpenAI-compatible Chat Completions API (`/chat/completions`)
-- **Fallback chain**: Multiple LLM endpoints tried in order; fails gracefully if all unavailable
-- **Line cap**: Max 500 dmesg lines per request to control LLM costs
-- **Locale**: `LC_ALL=C` for consistent dmesg timestamp parsing
-- **Storage**: SQLite with WAL mode for concurrent access
-- **Transport**: HTTPS with self-signed certs (TLS 1.2 minimum)
+- **LLM format**: OpenAI-compatible Chat Completions API (`/chat/completions`).
+- **Fallback chain**: Endpoints tried in order. Only *transient* errors (5xx/408/429, connection failures, timeouts) trigger fallback; parse errors and 4xx propagate immediately. `max_retries` adds in-endpoint retries before falling through. All-fail returns `ErrLLMUnavailable`, which the handler stores as status `llm_unavailable` (raw dmesg is preserved either way).
+- **Markdown-fenced JSON**: `stripCodeFence` in `internal/collector/llm.go` tolerates models that wrap JSON in ```` ```json ``` ```` despite the prompt.
+- **Line cap**: 500 dmesg lines per request (`MaxLines` in `internal/agent/dmesg.go`); the most recent are kept on truncation.
+- **Locale**: agent strips inherited `LC_ALL`/`LANG`/`LC_TIME` from the dmesg env before forcing `LC_ALL=C` so libc envp precedence cannot resurrect localized month names.
+- **Timestamps**: dmesg `-T` is parsed with `time.Local` (host's local zone), state file uses RFC3339Nano written atomically via `tmp` + `rename`.
+- **Clock-skew window**: collector handler stores `delta.Timestamp` from the agent unless it's zero, >5m in the future, or >24h in the past (then falls back to collector clock).
+- **Hostname**: rejected at both ends -- agent refuses to start with empty hostname (`internal/config/config.go`); collector handler returns 400 if `delta.Hostname == ""` (so a leaked bearer token can't write unfilterable rows).
+- **Auth**: shared `TASSEOGRAPH_API_KEY` bearer token between agent and collector; checked before payload parsing.
+- **Storage**: SQLite (pure-Go `modernc.org/sqlite`) with WAL mode; daily background pruner driven by `retention_days`.
+- **Transport**: HTTPS with self-signed certs (TLS 1.2 minimum). `Server.RunAndGetAddr` exists for tests that bind port 0.
 
 ## Future Work (Phase 2+)
 

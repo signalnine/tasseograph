@@ -62,6 +62,14 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The agent refuses to start without a hostname, but a leaked bearer token
+	// or a manual POST could otherwise insert rows that QueryByHostname can
+	// never surface. Reject at the wire instead of poisoning the DB.
+	if delta.Hostname == "" {
+		http.Error(w, "hostname is required", http.StatusBadRequest)
+		return
+	}
+
 	// Skip if no lines
 	if len(delta.Lines) == 0 {
 		w.WriteHeader(http.StatusOK)
@@ -71,11 +79,11 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Call LLM
 	var result *protocol.AnalysisResult
-	var latency int64
+	var meta AnalysisMeta
 	var llmErr error
 
 	if h.llm != nil {
-		result, latency, llmErr = h.llm.Analyze(r.Context(), delta.Lines)
+		result, meta, llmErr = h.llm.Analyze(r.Context(), delta.Lines)
 	}
 
 	// Honor the agent's collection timestamp so retries/queued sends record
@@ -92,7 +100,9 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Timestamp:    ts,
 		Hostname:     delta.Hostname,
 		RawDmesg:     strings.Join(delta.Lines, "\n"),
-		APILatencyMs: latency,
+		APILatencyMs: meta.LatencyMs,
+		Provider:     meta.Provider,
+		Model:        meta.Model,
 	}
 
 	if llmErr != nil {
@@ -120,6 +130,6 @@ func (h *IngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":     stored.Status,
-		"latency_ms": latency,
+		"latency_ms": meta.LatencyMs,
 	})
 }

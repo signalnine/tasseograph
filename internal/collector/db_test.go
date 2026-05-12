@@ -154,6 +154,62 @@ func TestPruneOlderThan(t *testing.T) {
 	}
 }
 
+// TestNewDBMigratesProviderModelColumns simulates an installation that
+// predates the provider/model schema additions and verifies NewDB upgrades
+// the table in place rather than failing or creating duplicates.
+func TestNewDBMigratesProviderModelColumns(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "old.db")
+
+	// Build the pre-migration schema by hand, then close.
+	{
+		db, err := NewDB(dbPath)
+		if err != nil {
+			t.Fatalf("NewDB: %v", err)
+		}
+		if _, err := db.db.Exec(`ALTER TABLE results DROP COLUMN provider`); err != nil {
+			t.Fatalf("simulate-old: drop provider: %v", err)
+		}
+		if _, err := db.db.Exec(`ALTER TABLE results DROP COLUMN model`); err != nil {
+			t.Fatalf("simulate-old: drop model: %v", err)
+		}
+		db.Close()
+	}
+
+	// Re-open via the public constructor. Migration must add the columns
+	// back without erroring, and inserts must work end-to-end.
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewDB after migration: %v", err)
+	}
+	defer db.Close()
+
+	err = db.InsertResult(&protocol.StoredResult{
+		Timestamp: time.Now(),
+		Hostname:  "host1",
+		Status:    "ok",
+		Provider:  "Google",
+		Model:     "google/gemini-3-flash-preview-20251217",
+	})
+	if err != nil {
+		t.Fatalf("InsertResult after migration: %v", err)
+	}
+
+	got, err := db.QueryByHostname("host1", 1)
+	if err != nil {
+		t.Fatalf("QueryByHostname: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("rows = %d, want 1", len(got))
+	}
+	if got[0].Provider != "Google" {
+		t.Errorf("Provider = %q, want %q", got[0].Provider, "Google")
+	}
+	if got[0].Model != "google/gemini-3-flash-preview-20251217" {
+		t.Errorf("Model = %q, want resolved model id", got[0].Model)
+	}
+}
+
 func TestScanResultsLogsUnmarshalError(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

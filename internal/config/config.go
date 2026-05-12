@@ -39,6 +39,17 @@ type CollectorConfig struct {
 	TLSKey          string        `yaml:"tls_key"`
 	LLMEndpoints    []LLMEndpoint `yaml:"llm_endpoints"` // fallback chain
 	APIKey          string        `yaml:"-"`             // agent auth, from env
+
+	// Email summary digest. Disabled when SummaryInterval == 0.
+	SummaryInterval time.Duration `yaml:"summary_interval"`
+	AlertErrorRate  float64       `yaml:"alert_error_rate"` // 0..1, fraction of rows in window that mark the digest [CRITICAL]
+	SMTPHost        string        `yaml:"smtp_host"`        // host:port
+	SMTPFrom        string        `yaml:"smtp_from"`
+	SMTPTo          string        `yaml:"smtp_to"`
+	SMTPUsername    string        `yaml:"smtp_username"`     // defaults to SMTPFrom when empty
+	SMTPPasswordEnv string        `yaml:"smtp_password_env"` // env var name for password
+	SMTPStartTLS    bool          `yaml:"smtp_starttls"`
+	SMTPPassword    string        `yaml:"-"` // resolved at load time
 }
 
 // LoadAgentConfig loads agent config from YAML file with env overrides
@@ -137,6 +148,41 @@ func LoadCollectorConfig(path string) (*CollectorConfig, error) {
 	}
 	if cfg.TLSKey == "" {
 		return nil, errors.New("tls_key is required in config")
+	}
+
+	// Summary/SMTP: only validate when the feature is turned on. Disabled
+	// (interval == 0) is the supported zero-value default; everything else
+	// must be fully specified so we fail fast instead of silently never sending.
+	if cfg.SummaryInterval < 0 {
+		return nil, errors.New("summary_interval must be >= 0 (0 disables digest emails)")
+	}
+	if cfg.SummaryInterval > 0 {
+		if cfg.SummaryInterval < time.Hour {
+			return nil, errors.New("summary_interval must be >= 1h when enabled")
+		}
+		if cfg.SMTPHost == "" {
+			return nil, errors.New("smtp_host is required when summary_interval > 0")
+		}
+		if cfg.SMTPFrom == "" {
+			return nil, errors.New("smtp_from is required when summary_interval > 0")
+		}
+		if cfg.SMTPTo == "" {
+			return nil, errors.New("smtp_to is required when summary_interval > 0")
+		}
+		if cfg.SMTPPasswordEnv != "" {
+			cfg.SMTPPassword = os.Getenv(cfg.SMTPPasswordEnv)
+		}
+		// Default the SMTP username to the from-address. Fastmail, Gmail, and
+		// most other providers treat the auth username as the mailbox identifier.
+		if cfg.SMTPUsername == "" {
+			cfg.SMTPUsername = cfg.SMTPFrom
+		}
+		if cfg.AlertErrorRate < 0 || cfg.AlertErrorRate > 1 {
+			return nil, errors.New("alert_error_rate must be between 0 and 1")
+		}
+		if cfg.AlertErrorRate == 0 {
+			cfg.AlertErrorRate = 0.5 // default: >50% error rate flags the digest as critical
+		}
 	}
 
 	return &cfg, nil
